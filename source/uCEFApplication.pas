@@ -60,14 +60,14 @@ uses
 
 const
   CEF_SUPPORTED_VERSION_MAJOR   = 3;
-  CEF_SUPPORTED_VERSION_MINOR   = 3396;
-  CEF_SUPPORTED_VERSION_RELEASE = 1782;
+  CEF_SUPPORTED_VERSION_MINOR   = 3497;
+  CEF_SUPPORTED_VERSION_RELEASE = 1831;
   CEF_SUPPORTED_VERSION_BUILD   = 0;
 
-  CEF_CHROMEELF_VERSION_MAJOR   = 67;
+  CEF_CHROMEELF_VERSION_MAJOR   = 69;
   CEF_CHROMEELF_VERSION_MINOR   = 0;
-  CEF_CHROMEELF_VERSION_RELEASE = 3396;
-  CEF_CHROMEELF_VERSION_BUILD   = 79;
+  CEF_CHROMEELF_VERSION_RELEASE = 3497;
+  CEF_CHROMEELF_VERSION_BUILD   = 100;
 
   LIBCEF_DLL                    = 'libcef.dll';
   CHROMEELF_DLL                 = 'chrome_elf.dll';
@@ -145,6 +145,7 @@ type
       FShutdownWaitTime              : cardinal;
       FWidevinePath                  : ustring;
       FMustFreeLibrary               : boolean;
+      FAutoplayPolicy                : TCefAutoplayPolicy;
 
       FMustCreateResourceBundleHandler : boolean;
       FMustCreateBrowserProcessHandler : boolean;
@@ -185,6 +186,7 @@ type
       procedure SetOsmodalLoop(aValue : boolean);
 
       function  GetChromeVersion : string;
+      function  GetLibCefVersion : string;
       function  GetLibCefPath : string;
       function  GetChromeElfPath : string;
       function  GetMustCreateResourceBundleHandler : boolean;
@@ -249,11 +251,10 @@ type
       function  ExecuteProcess(const aApp : ICefApp) : integer;
       procedure InitializeSettings(var aSettings : TCefSettings);
       function  InitializeLibrary(const aApp : ICefApp) : boolean;
-      function  InitializeCookies : boolean;
+      procedure RenameAndDeleteDir(const aDirectory : string);
       function  MultiExeProcessing : boolean;
       function  SingleExeProcessing : boolean;
       function  CheckCEFLibrary : boolean;
-      procedure DeleteDirContents(const aDirectory : string);
       procedure RegisterWidevineCDM;
       function  FindFlashDLL(var aFileName : string) : boolean;
       procedure ShowErrorMessageDlg(const aError : string); virtual;
@@ -339,6 +340,7 @@ type
       property ChromeRelease                     : uint16                              read FChromeVersionInfo.Release;
       property ChromeBuild                       : uint16                              read FChromeVersionInfo.Build;
       property ChromeVersion                     : string                              read GetChromeVersion;
+      property LibCefVersion                     : string                              read GetLibCefVersion;
       property LibCefPath                        : string                              read GetLibCefPath;
       property ChromeElfPath                     : string                              read GetChromeElfPath;
       property SmoothScrolling                   : TCefState                           read FSmoothScrolling                   write FSmoothScrolling;
@@ -365,6 +367,7 @@ type
       property ShutdownWaitTime                  : cardinal                            read FShutdownWaitTime                  write FShutdownWaitTime;
       property WidevinePath                      : ustring                             read FWidevinePath                      write FWidevinePath;
       property MustFreeLibrary                   : boolean                             read FMustFreeLibrary                   write FMustFreeLibrary;
+      property AutoplayPolicy                    : TCefAutoplayPolicy                  read FAutoplayPolicy                    write FAutoplayPolicy;
       property ChildProcessesCount               : integer                             read GetChildProcessesCount;
 
       property OnRegCustomSchemes                : TOnRegisterCustomSchemesEvent       read FOnRegisterCustomSchemes           write FOnRegisterCustomSchemes;
@@ -395,6 +398,27 @@ type
       property OnCDMRegistrationComplete         : TOnCDMRegistrationCompleteEvent     read FOnCDMRegistrationComplete         write FOnCDMRegistrationComplete;
   end;
 
+  TCEFCookieInitializerThread = class(TThread)
+    protected
+      FCookies               : string;
+      FPersistSessionCookies : boolean;
+
+      procedure Execute; override;
+
+    public
+      constructor Create(const aCookies : string; aPersistSessionCookies : boolean);
+  end;
+
+  TCEFDirectoryDeleterThread = class(TThread)
+    protected
+      FDirectory : string;
+
+      procedure Execute; override;
+
+    public
+      constructor Create(const aDirectory : string);
+  end;
+
 var
   GlobalCEFApp : TCefApplication = nil;
 
@@ -414,7 +438,8 @@ uses
     {$ENDIF}
   {$ENDIF}
   uCEFLibFunctions, uCEFMiscFunctions, uCEFCommandLine, uCEFConstants,
-  uCEFSchemeHandlerFactory, uCEFCookieManager, uCEFApp, uCEFRegisterCDMCallback;
+  uCEFSchemeHandlerFactory, uCEFCookieManager, uCEFApp, uCEFRegisterCDMCallback,
+  uCEFCompletionCallback, uCEFWaitableEvent;
 
 procedure DestroyGlobalCEFApp;
 begin
@@ -473,7 +498,7 @@ begin
   FOnRegisterCustomSchemes       := nil;
   FEnableHighDPISupport          := False;
   FMuteAudio                     := False;
-  FSitePerProcess                := False;
+  FSitePerProcess                := True;
   FDisableWebSecurity            := False;
   FDisablePDFExtension           := False;
   FReRaiseExceptions             := False;
@@ -488,6 +513,7 @@ begin
   FShutdownWaitTime              := 0;
   FWidevinePath                  := '';
   FMustFreeLibrary               := False;
+  FAutoplayPolicy                := appDefault;
 
   FMustCreateResourceBundleHandler := False;
   FMustCreateBrowserProcessHandler := True;
@@ -619,6 +645,14 @@ end;
 function TCefApplication.GetChromeVersion : string;
 begin
   Result := FileVersionInfoToString(FChromeVersionInfo);
+end;
+
+function TCefApplication.GetLibCefVersion : string;
+begin
+  Result := IntToStr(CEF_SUPPORTED_VERSION_MAJOR)    + '.' +
+            IntToStr(CEF_SUPPORTED_VERSION_MINOR)    + '.' +
+            IntToStr(CEF_SUPPORTED_VERSION_RELEASE)  + '.' +
+            IntToStr(CEF_SUPPORTED_VERSION_BUILD);
 end;
 
 function TCefApplication.GetLibCefPath : string;
@@ -764,6 +798,8 @@ function TCefApplication.CheckCEFLibrary : boolean;
 var
   TempString, TempOldDir : string;
   TempMissingFrm, TempMissingRsc, TempMissingLoc : boolean;
+  TempMachine : integer;
+  TempVersionInfo : TFileVersionInfo;
 begin
   Result := False;
 
@@ -799,20 +835,66 @@ begin
                            CEF_SUPPORTED_VERSION_MINOR,
                            CEF_SUPPORTED_VERSION_RELEASE,
                            CEF_SUPPORTED_VERSION_BUILD) then
-          Result := True
+          begin
+            if GetDLLHeaderMachine(LibCefPath, TempMachine) then
+              case TempMachine of
+                IMAGE_FILE_MACHINE_I386 :
+                  if Is32BitProcess then
+                    Result := True
+                   else
+                    begin
+                      FStatus    := asErrorDLLVersion;
+                      TempString := 'Wrong CEF3 binaries !' +
+                                    CRLF + CRLF +
+                                    'Use the 32 bit CEF3 binaries with 32 bits applications only.';
+
+                      ShowErrorMessageDlg(TempString);
+                    end;
+
+                IMAGE_FILE_MACHINE_AMD64 :
+                  if not(Is32BitProcess) then
+                    Result := True
+                   else
+                    begin
+                      FStatus    := asErrorDLLVersion;
+                      TempString := 'Wrong CEF3 binaries !' +
+                                    CRLF + CRLF +
+                                    'Use the 64 bit CEF3 binaries with 64 bits applications only.';
+
+                      ShowErrorMessageDlg(TempString);
+                    end;
+
+                else
+                  begin
+                    FStatus    := asErrorDLLVersion;
+                    TempString := 'Unknown CEF3 binaries !' +
+                                  CRLF + CRLF +
+                                  'Use only the CEF3 binaries specified in the CEF4Delphi Readme.md file at ' +
+                                  CEF4DELPHI_URL;
+
+                    ShowErrorMessageDlg(TempString);
+                  end;
+              end
+             else
+              Result := True;
+          end
          else
           begin
             FStatus    := asErrorDLLVersion;
             TempString := 'Unsupported CEF version !' +
                           CRLF + CRLF +
                           'Use only the CEF3 binaries specified in the CEF4Delphi Readme.md file at ' +
-                          CRLF + CEF4DELPHI_URL;
+                          CEF4DELPHI_URL;
+
+            if GetDLLVersion(LibCefPath, TempVersionInfo) then
+              TempString := TempString + CRLF + CRLF +
+                            'Expected ' + LIBCEF_DLL + ' version : ' + LibCefVersion + CRLF +
+                            'Found ' + LIBCEF_DLL + ' version : ' + FileVersionInfoToString(TempVersionInfo);
 
             ShowErrorMessageDlg(TempString);
           end;
 
       if FSetCurrentDir then chdir(TempOldDir);
-
     end;
 end;
 
@@ -940,7 +1022,6 @@ end;
 procedure TCefApplication.InitializeSettings(var aSettings : TCefSettings);
 begin
   aSettings.size                            := SizeOf(TCefSettings);
-  aSettings.single_process                  := Ord(FSingleProcess);
   aSettings.no_sandbox                      := Ord(FNoSandbox);
   aSettings.browser_subprocess_path         := CefString(FBrowserSubprocessPath);
   aSettings.framework_dir_path              := CefString(FFrameworkDirPath);
@@ -979,8 +1060,8 @@ begin
     try
       if (aApp <> nil) then
         begin
-          if FDeleteCache   then DeleteDirContents(FCache);
-          if FDeleteCookies then DeleteDirContents(FCookies);
+          if FDeleteCache   then RenameAndDeleteDir(FCache);
+          if FDeleteCookies then RenameAndDeleteDir(FCookies);
 
           RegisterWidevineCDM;
 
@@ -1008,64 +1089,44 @@ begin
   end;
 end;
 
-function TCefApplication.InitializeCookies : boolean;
+procedure TCefApplication.RenameAndDeleteDir(const aDirectory : string);
 var
-  TempCookieManager : ICefCookieManager;
+  TempOldDir, TempNewDir : string;
+  i : integer;
+  TempThread : TCEFDirectoryDeleterThread;
 begin
-  Result := False;
-
   try
-    if (length(FCookies) > 0) then
-      begin
-        TempCookieManager := TCefCookieManagerRef.Global(nil);
+    if (length(aDirectory) = 0) or not(DirectoryExists(aDirectory)) then exit;
 
-        if (TempCookieManager <> nil) and
-           TempCookieManager.SetStoragePath(FCookies, FPersistSessionCookies, nil) then
-          Result := True
+    TempOldDir := ExcludeTrailingPathDelimiter(aDirectory);
+
+    if (Pos(PathDelim, TempOldDir {$IFNDEF FPC}, 1{$ENDIF}) > 0) and
+       (length(ExtractFileName(TempOldDir)) > 0) then
+      begin
+        i := 0;
+
+        repeat
+          inc(i);
+          TempNewDir := TempOldDir + '(' + inttostr(i) + ')';
+        until not(DirectoryExists(TempNewDir));
+
+        if MoveFileW(PWideChar(TempOldDir + chr(0)), PWideChar(TempNewDir + chr(0))) then
+          begin
+            TempThread := TCEFDirectoryDeleterThread.Create(TempNewDir);
+            {$IFDEF DELPHI14_UP}
+            TempThread.Start;
+            {$ELSE}
+            TempThread.Resume;
+            {$ENDIF}
+          end
          else
-          OutputDebugMessage('TCefApplication.InitializeCookies error : cookies cannot be accessed');
+          DeleteDirContents(aDirectory);
       end
      else
-      Result := True;
+      DeleteDirContents(aDirectory);
   except
     on e : exception do
-      if CustomExceptionHandler('TCefApplication.InitializeCookies', e) then raise;
-  end;
-end;
-
-procedure TCefApplication.DeleteDirContents(const aDirectory : string);
-{$IFNDEF DELPHI14_UP}
-var
-  TempRec : TSearchRec;
-{$ENDIF}
-begin
-  try
-    if (length(aDirectory) > 0) and DirectoryExists(aDirectory) then
-      begin
-        {$IFDEF DELPHI14_UP}
-        TDirectory.Delete(aDirectory, True);
-        {$ELSE}
-        if (FindFirst(aDirectory + '\*', faAnyFile, TempRec) = 0) then
-          begin
-            try
-              repeat
-                if ((TempRec.Attr and faDirectory) <> 0) then
-                  begin
-                    if (TempRec.Name <> '.') and (TempRec.Name <> '..') then
-                      DeleteDirContents(aDirectory + '\' + TempRec.Name)
-                  end
-                else
-                 DeleteFile(aDirectory + '\' + TempRec.Name);
-              until (FindNext(TempRec) <> 0);
-            finally
-              FindClose(TempRec);
-            end;
-          end;
-        {$ENDIF}
-      end;
-  except
-    on e : exception do
-      if CustomExceptionHandler('TCefApplication.DeleteDirContents', e) then raise;
+      if CustomExceptionHandler('TCefApplication.RenameAndDeleteDir', e) then raise;
   end;
 end;
 
@@ -1174,9 +1235,20 @@ begin
 end;
 
 procedure TCefApplication.Internal_OnContextInitialized;
+var
+  TempThread : TCEFCookieInitializerThread;
 begin
-  InitializeCookies;
   FGlobalContextInitialized := True;
+
+  if (length(FCookies) > 0) then
+    begin
+      TempThread := TCEFCookieInitializerThread.Create(FCookies, FPersistSessionCookies);
+      {$IFDEF DELPHI14_UP}
+      TempThread.Start;
+      {$ELSE}
+      TempThread.Resume;
+      {$ENDIF}
+    end;
 
   if assigned(FOnContextInitialized) then FOnContextInitialized();
 end;
@@ -1315,9 +1387,26 @@ begin
           commandLine.AppendSwitch('--disable-gpu-compositing');
         end;
 
+      if FSingleProcess then
+        commandLine.AppendSwitch('--single-process');
+
       case FSmoothScrolling of
         STATE_ENABLED  : commandLine.AppendSwitch('--enable-smooth-scrolling');
         STATE_DISABLED : commandLine.AppendSwitch('--disable-smooth-scrolling');
+      end;
+
+      case FAutoplayPolicy of
+        appDocumentUserActivationRequired    :
+          commandLine.AppendSwitchWithValue('--autoplay-policy', 'document-user-activation-required');
+
+        appNoUserGestureRequired             :
+          commandLine.AppendSwitchWithValue('--autoplay-policy', 'no-user-gesture-required');
+
+        appUserGestureRequired               :
+          commandLine.AppendSwitchWithValue('--autoplay-policy', 'user-gesture-required');
+
+        appUserGestureRequiredForCrossOrigin :
+          commandLine.AppendSwitchWithValue('--autoplay-policy', 'user-gesture-required-for-cross-origin');
       end;
 
       if FFastUnload then
@@ -2170,6 +2259,73 @@ begin
   {$ELSE}
   Result := True;
   {$ENDIF}
+end;
+
+
+// TCEFCookieInitializerThread
+
+constructor TCEFCookieInitializerThread.Create(const aCookies : string; aPersistSessionCookies : boolean);
+begin
+  inherited Create(True);
+
+  FCookies               := aCookies;
+  FPersistSessionCookies := aPersistSessionCookies;
+  FreeOnTerminate        := True;
+end;
+
+procedure TCEFCookieInitializerThread.Execute;
+var
+  TempCookieManager : ICefCookieManager;
+  TempCallBack      : ICefCompletionCallback;
+  TempEvent         : ICefWaitableEvent;
+begin
+  try
+    try
+      if (length(FCookies) > 0) then
+        begin
+          TempEvent         := TCefWaitableEventRef.New(True, False);
+          TempCallBack      := TCefEventCompletionCallback.Create(TempEvent);
+          TempCookieManager := TCefCookieManagerRef.Global(TempCallBack);
+
+          if TempEvent.TimedWait(5000) and (TempCookieManager <> nil) then
+            TempCookieManager.SetStoragePath(FCookies, FPersistSessionCookies, nil);
+        end;
+    except
+      on e : exception do
+        if CustomExceptionHandler('TCEFCookieInitializerThread.Execute', e) then raise;
+    end;
+  finally
+    TempCookieManager := nil;
+    TempCallBack      := nil;
+    TempEvent         := nil;
+  end;
+end;
+
+
+
+// TCEFDirectoryDeleterThread
+
+constructor TCEFDirectoryDeleterThread.Create(const aDirectory : string);
+begin
+  inherited Create(True);
+
+  FDirectory      := aDirectory;
+  FreeOnTerminate := True;
+end;
+
+procedure TCEFDirectoryDeleterThread.Execute;
+begin
+
+  try
+    {$IFDEF DELPHI14_UP}
+    TDirectory.Delete(FDirectory, True);
+    {$ELSE}
+    if DeleteDirContents(FDirectory) then RemoveDir(FDirectory);
+    {$ENDIF}
+  except
+    on e : exception do
+      if CustomExceptionHandler('TCEFDirectoryDeleterThread.Execute', e) then raise;
+  end;
 end;
 
 end.

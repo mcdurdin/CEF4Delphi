@@ -2,8 +2,8 @@ object Form1: TForm1
   Left = 0
   Top = 0
   Caption = 'Simple OSR Browser - Initializing browser. Please wait...'
-  ClientHeight = 530
-  ClientWidth = 800
+  ClientHeight = 668
+  ClientWidth = 988
   Color = clBtnFace
   Font.Charset = DEFAULT_CHARSET
   Font.Color = clWindowText
@@ -23,7 +23,7 @@ object Form1: TForm1
   object NavControlPnl: TPanel
     Left = 0
     Top = 0
-    Width = 800
+    Width = 988
     Height = 30
     Align = alTop
     BevelOuter = bvNone
@@ -37,7 +37,7 @@ object Form1: TForm1
     object ComboBox1: TComboBox
       Left = 5
       Top = 5
-      Width = 721
+      Width = 909
       Height = 21
       Align = alClient
       ItemIndex = 0
@@ -52,9 +52,10 @@ object Form1: TForm1
           't_form'
         'https://www.briskbard.com'
         'https://frames-per-second.appspot.com/')
+      ExplicitWidth = 875
     end
     object Panel2: TPanel
-      Left = 726
+      Left = 914
       Top = 5
       Width = 69
       Height = 20
@@ -99,14 +100,15 @@ object Form1: TForm1
         TabOrder = 1
         OnClick = SnapshotBtnClick
         OnEnter = SnapshotBtnEnter
+        ExplicitLeft = 72
       end
     end
   end
   object Panel1: TBufferPanel
     Left = 0
     Top = 30
-    Width = 800
-    Height = 500
+    Width = 988
+    Height = 638
     Align = alClient
     Caption = 'Panel1'
     TabOrder = 1
@@ -119,6 +121,7 @@ object Form1: TForm1
     OnMouseUp = Panel1MouseUp
     OnResize = Panel1Resize
     OnMouseLeave = Panel1MouseLeave
+    ExplicitHeight = 458
   end
   object chrmosr: TChromium
     OnTooltip = chrmosrTooltip

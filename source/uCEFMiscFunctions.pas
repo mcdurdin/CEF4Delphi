@@ -52,9 +52,9 @@ interface
 
 uses
   {$IFDEF DELPHI16_UP}
-    {$IFDEF MSWINDOWS}WinApi.Windows, WinApi.ActiveX,{$ENDIF} System.Classes, System.SysUtils, System.UITypes, System.Math,
+    {$IFDEF MSWINDOWS}WinApi.Windows, WinApi.ActiveX,{$ENDIF} System.IOUtils, System.Classes, System.SysUtils, System.UITypes, System.Math,
   {$ELSE}
-    {$IFDEF MSWINDOWS}Windows, ActiveX,{$ENDIF} Classes, SysUtils, Controls, Graphics, Math,
+    {$IFDEF MSWINDOWS}Windows, ActiveX,{$ENDIF} {$IFDEF DELPHI14_UP}IOUtils,{$ENDIF} Classes, SysUtils, Controls, Graphics, Math,
   {$ENDIF}
   uCEFTypes, uCEFInterfaces, uCEFLibFunctions, uCEFResourceHandler,
   uCEFRegisterCDMCallback;
@@ -121,6 +121,7 @@ procedure WindowInfoAsWindowless(var aWindowInfo : TCefWindowInfo; aParent : TCe
 {$ENDIF}
 
 {$IFDEF MSWINDOWS}
+function ProcessUnderWow64(hProcess: THandle; var Wow64Process: BOOL): BOOL; external Kernel32DLL name 'IsWow64Process';
 function TzSpecificLocalTimeToSystemTime(lpTimeZoneInformation: PTimeZoneInformation; lpLocalTime, lpUniversalTime: PSystemTime): BOOL; stdcall; external Kernel32DLL;
 function SystemTimeToTzSpecificLocalTime(lpTimeZoneInformation: PTimeZoneInformation; lpUniversalTime, lpLocalTime: PSystemTime): BOOL; stdcall; external Kernel32DLL;
 
@@ -171,6 +172,8 @@ function CheckDLLs(const aFrameworkDirPath : string; var aMissingFiles : string)
 function CheckDLLVersion(const aDLLFile : string; aMajor, aMinor, aRelease, aBuild : uint16) : boolean;
 function FileVersionInfoToString(const aVersionInfo : TFileVersionInfo) : string;
 function CheckFilesExist(var aList : TStringList; var aMissingFiles : string) : boolean;
+function GetDLLHeaderMachine(const aDLLFile : string; var aMachine : integer) : boolean;
+function Is32BitProcess : boolean;
 
 function  CefParseUrl(const url: ustring; var parts: TUrlParts): Boolean;
 function  CefCreateUrl(var parts: TUrlParts): ustring;
@@ -217,6 +220,8 @@ procedure LogicalToDevice(var aRect : TCEFRect; const aDeviceScaleFactor : doubl
 
 function GetScreenDPI : integer;
 function GetDeviceScaleFactor : single;
+
+function DeleteDirContents(const aDirectory : string) : boolean;
 
 implementation
 
@@ -362,7 +367,10 @@ function CefRegisterExtension(const name, code: ustring; const Handler: ICefv8Ha
 var
   TempName, TempCode : TCefString;
 begin
-  if (GlobalCEFApp <> nil) and GlobalCEFApp.LibLoaded then
+  if (GlobalCEFApp <> nil)  and
+     GlobalCEFApp.LibLoaded and
+     (length(name) > 0)     and
+     (length(code) > 0)     then
     begin
       TempName := CefString(name);
       TempCode := CefString(code);
@@ -412,18 +420,32 @@ function CefTimeToDateTime(const dt: TCefTime): TDateTime;
 var
   TempTime : TSystemTime;
 begin
-  TempTime := CefTimeToSystemTime(dt);
-  SystemTimeToTzSpecificLocalTime(nil, @TempTime, @TempTime);
-  Result   := SystemTimeToDateTime(TempTime);
+  Result := 0;
+
+  try
+    TempTime := CefTimeToSystemTime(dt);
+    SystemTimeToTzSpecificLocalTime(nil, @TempTime, @TempTime);
+    Result   := SystemTimeToDateTime(TempTime);
+  except
+    on e : exception do
+      if CustomExceptionHandler('CefTimeToDateTime', e) then raise;
+  end;
 end;
 
 function DateTimeToCefTime(dt: TDateTime): TCefTime;
 var
   TempTime : TSystemTime;
 begin
-  DateTimeToSystemTime(dt, TempTime);
-  TzSpecificLocalTimeToSystemTime(nil, @TempTime, @TempTime);
-  Result := SystemTimeToCefTime(TempTime);
+  FillChar(Result, SizeOf(TCefTime), 0);
+
+  try
+    DateTimeToSystemTime(dt, TempTime);
+    TzSpecificLocalTimeToSystemTime(nil, @TempTime, @TempTime);
+    Result := SystemTimeToCefTime(TempTime);
+  except
+    on e : exception do
+      if CustomExceptionHandler('DateTimeToCefTime', e) then raise;
+  end;
 end;
 
 function cef_string_wide_copy(const src: PWideChar; src_len: NativeUInt;  output: PCefStringWide): Integer;
@@ -1163,6 +1185,131 @@ begin
             (TempVersionInfo.Build    = aBuild);
 end;
 
+// This function is based on the answer given by 'Alex' in StackOverflow
+// https://stackoverflow.com/questions/2748474/how-to-determine-if-dll-file-was-compiled-as-x64-or-x86-bit-using-either-delphi
+function GetDLLHeaderMachine(const aDLLFile : string; var aMachine : integer) : boolean;
+var
+  TempHeader         : TImageDosHeader;
+  TempImageNtHeaders : TImageNtHeaders;
+  TempStream         : TFileStream;
+begin
+  Result     := False;
+  aMachine   := IMAGE_FILE_MACHINE_UNKNOWN;
+  TempStream := nil;
+
+  try
+    try
+      if FileExists(aDLLFile) then
+        begin
+          TempStream := TFileStream.Create(aDLLFile, fmOpenRead);
+          TempStream.seek(0, soFromBeginning);
+          TempStream.ReadBuffer(TempHeader, SizeOf(TempHeader));
+
+          if (TempHeader.e_magic = IMAGE_DOS_SIGNATURE) and
+             (TempHeader._lfanew <> 0) then
+            begin
+              TempStream.Position := TempHeader._lfanew;
+              TempStream.ReadBuffer(TempImageNtHeaders, SizeOf(TempImageNtHeaders));
+
+              if (TempImageNtHeaders.Signature = IMAGE_NT_SIGNATURE) then
+                begin
+                  aMachine := TempImageNtHeaders.FileHeader.Machine;
+                  Result   := True;
+                end;
+            end;
+        end;
+    except
+      on e : exception do
+        if CustomExceptionHandler('GetDLLHeaderMachine', e) then raise;
+    end;
+  finally
+    if (TempStream <> nil) then FreeAndNil(TempStream);
+  end;
+end;
+
+function Is32BitProcess : boolean;
+{$IFDEF MSWINDOWS}
+var
+  TempResult : BOOL;
+{$ENDIF}
+begin
+  {$IFDEF CPUX32}
+    Result := True;
+    exit;
+  {$ENDIF}
+
+  {$IFDEF CPU386}
+    Result := True;
+    exit;
+  {$ENDIF}
+
+  {$IFDEF CPUi386}
+    Result := True;
+    exit;
+  {$ENDIF}
+
+  {$IFDEF CPUPOWERPC32}
+    Result := True;
+    exit;
+  {$ENDIF}
+
+  {$IFDEF CPUSPARC32}
+    Result := True;
+    exit;
+  {$ENDIF}
+
+  {$IFDEF CPU32BITS}
+    Result := True;
+    exit;
+  {$ENDIF}
+
+  {$IFDEF CPUARM32}
+    Result := True;
+    exit;
+  {$ENDIF}
+
+  {$IFDEF WIN32}
+    Result := True;
+    exit;
+  {$ENDIF}
+
+  {$IFDEF IOS32}
+    Result := True;
+    exit;
+  {$ENDIF}
+
+  {$IFDEF MACOS32}
+    Result := True;
+    exit;
+  {$ENDIF}
+
+  {$IFDEF LINUX32}
+    Result := True;
+    exit;
+  {$ENDIF}
+
+  {$IFDEF POSIX32}
+    Result := True;
+    exit;
+  {$ENDIF}
+
+  {$IFDEF ANDROID32}
+    Result := True;
+    exit;
+  {$ENDIF}
+
+  {$IFDEF MSWINDOWS}
+    Result := ProcessUnderWow64(GetCurrentProcess, TempResult) and TempResult;
+    exit;
+  {$ENDIF}
+
+  {$IFDEF DELPHI16_UP}
+    Result := TOSVersion.Architecture in [arIntelX86, arARM32];
+  {$ELSE}
+    Result := False;
+  {$ENDIF}
+end;
+
 function CustomPathIsRelative(const aPath : string) : boolean;
 begin
   {$IFDEF DELPHI12_UP}
@@ -1681,6 +1828,43 @@ end;
 function GetDeviceScaleFactor : single;
 begin
   Result := GetScreenDPI / 96;
+end;
+
+function DeleteDirContents(const aDirectory : string) : boolean;
+var
+  TempRec  : TSearchRec;
+  TempPath : string;
+begin
+  Result := True;
+
+  try
+    if (length(aDirectory) > 0) and
+       DirectoryExists(aDirectory) and
+       (FindFirst(aDirectory + '\*', faAnyFile, TempRec) = 0) then
+      try
+        repeat
+          TempPath := aDirectory + PathDelim + TempRec.Name;
+
+          if ((TempRec.Attr and faDirectory) <> 0) then
+            begin
+              if (TempRec.Name <> '.') and (TempRec.Name <> '..') then
+                begin
+                  if DeleteDirContents(TempPath) then
+                    Result := RemoveDir(TempPath) and Result
+                   else
+                    Result := False;
+                end;
+            end
+           else
+            Result := DeleteFile(TempPath) and Result;
+        until (FindNext(TempRec) <> 0) or not(Result);
+      finally
+        FindClose(TempRec);
+      end;
+  except
+    on e : exception do
+      if CustomExceptionHandler('DeleteDirContents', e) then raise;
+  end;
 end;
 
 end.

@@ -222,6 +222,10 @@ const
   DRAG_OPERATION_EVERY    = $FFFFFFFF;
 
   // /include/internal/cef_types.h (cef_file_dialog_mode_t)
+  FILE_DIALOG_OPEN                 = $00000000;
+  FILE_DIALOG_OPEN_MULTIPLE        = $00000001;
+  FILE_DIALOG_OPEN_FOLDER          = $00000002;
+  FILE_DIALOG_SAVE                 = $00000003;
   FILE_DIALOG_TYPE_MASK            = $000000FF;
   FILE_DIALOG_OVERWRITEPROMPT_FLAG = $01000000;
   FILE_DIALOG_HIDEREADONLY_FLAG    = $02000000;
@@ -326,6 +330,12 @@ const
   LOGSEVERITY_ERROR    = 4;
   LOGSEVERITY_DISABLE  = 99;
 
+  // /include/internal/cef_types.h (cef_duplex_mode_t)
+  DUPLEX_MODE_UNKNOWN    = -1;
+  DUPLEX_MODE_SIMPLEX    = 0;
+  DUPLEX_MODE_LONG_EDGE  = 1;
+  DUPLEX_MODE_SHORT_EDGE = 2;
+
 
 //******************************************************
 //****************** OTHER CONSTANTS *******************
@@ -391,6 +401,17 @@ const
 
   CEF4DELPHI_URL = 'https://github.com/salvadordf/CEF4Delphi';
   CRLF           = #13 + #10;
+
+  IMAGE_FILE_MACHINE_UNKNOWN  = 0;
+  IMAGE_FILE_MACHINE_I386     = $014c; // Intel x86
+  IMAGE_FILE_MACHINE_IA64     = $0200; // Intel Itanium Processor Family (IPF)
+  IMAGE_FILE_MACHINE_AMD64    = $8664; // x64 (AMD64 or EM64T)
+  IMAGE_FILE_MACHINE_R3000_BE = $160;  // MIPS big-endian
+  IMAGE_FILE_MACHINE_R3000    = $162;  // MIPS little-endian, 0x160 big-endian
+  IMAGE_FILE_MACHINE_R4000    = $166;  // MIPS little-endian
+  IMAGE_FILE_MACHINE_R10000   = $168;  // MIPS little-endian
+  IMAGE_FILE_MACHINE_ALPHA    = $184;  // Alpha_AXP }
+  IMAGE_FILE_MACHINE_POWERPC  = $1F0;  // IBM PowerPC Little-Endian
 
 implementation
 
